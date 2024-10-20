@@ -1,6 +1,6 @@
 const WeatherData = require("./models/WeatherData");
 const DailySummary = require("./models/DailySummary");
-
+const exportRoutes = require("./routes/export");
 require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
@@ -18,6 +18,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use("/api", weatherRoutes);
+app.use("/api", exportRoutes);
+
+// Analysis endpoint
+app.get("/api/analysis/:city", async (req, res) => {
+  try {
+    const { analyzeWeatherPatterns } = require("./utils/analysis");
+    const analysis = await analyzeWeatherPatterns(req.params.city);
+    res.json(analysis);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 mongoose
   .connect(process.env.MONGODB_URI)
@@ -58,7 +70,9 @@ cron.schedule("0 0 * * *", async () => {
   for (const city of CITIES) {
     try {
       const summary = await calculateDailySummary(city, yesterday);
-      await DailySummary.create(summary);
+      if (summary) {
+        await DailySummary.create(summary);
+      }
     } catch (error) {
       console.error(`Error calculating summary for ${city}:`, error);
     }
