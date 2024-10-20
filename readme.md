@@ -166,7 +166,3 @@ Access historical data exports at:
 
 - `/api/export/csv` - CSV format
 - `/api/export/json` - JSON format
-
-## Demo csv file
-
-[text](<c:/Users/Rajnish Kumar Singh/Downloads/weather-data-Delhi.csv>)
