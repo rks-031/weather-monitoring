@@ -2,17 +2,6 @@ const axios = require("axios");
 const nodemailer = require("nodemailer");
 const Threshold = require("../models/Threshold");
 const WeatherData = require("../models/WeatherData");
-const Redis = require("ioredis");
-const rateLimit = require("express-rate-limit");
-
-const redis = new Redis(process.env.REDIS_URL);
-const CACHE_DURATION = 300; // 5 minutes
-
-// Rate limiting for API calls
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 60,
-});
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -24,21 +13,8 @@ const transporter = nodemailer.createTransport({
 
 const thresholdBreaches = {};
 
-async function getCachedData(key) {
-  const cached = await redis.get(key);
-  return cached ? JSON.parse(cached) : null;
-}
-
-async function setCachedData(key, data) {
-  await redis.setex(key, CACHE_DURATION, JSON.stringify(data));
-}
-
 async function fetchWeatherData(city) {
   try {
-    const cacheKey = `weather:${city}`;
-    const cachedData = await getCachedData(cacheKey);
-    if (cachedData) return cachedData;
-
     const geoData = await axios.get(
       `http://api.openweathermap.org/geo/1.0/direct?q=${city},IN&limit=1&appid=${process.env.OPENWEATHER_API_KEY}`
     );
@@ -58,20 +34,13 @@ async function fetchWeatherData(city) {
     ]);
 
     const forecastData = processForecastData(forecast.data.list);
-    const weatherData = processCurrentWeather(
+    return processCurrentWeather(
       current.data,
       uv.data.value,
       city,
       forecastData
     );
-
-    await setCachedData(cacheKey, weatherData);
-    return weatherData;
   } catch (error) {
-    if (error.response?.status === 429) {
-      const cachedData = await getCachedData(`weather:${city}`);
-      if (cachedData) return cachedData;
-    }
     console.error(`Error fetching weather data for ${city}:`, error);
     throw error;
   }
@@ -109,10 +78,6 @@ function kelvinToCelsius(kelvin) {
 
 async function calculateDailySummary(city, date) {
   try {
-    const cacheKey = `summary:${city}:${date.toISOString().split("T")[0]}`;
-    const cachedSummary = await getCachedData(cacheKey);
-    if (cachedSummary) return cachedSummary;
-
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(date);
@@ -125,9 +90,7 @@ async function calculateDailySummary(city, date) {
 
     if (weatherData.length === 0) return null;
 
-    const summary = calculateSummaryStats(weatherData);
-    await setCachedData(cacheKey, summary);
-    return summary;
+    return calculateSummaryStats(weatherData);
   } catch (error) {
     console.error(`Error calculating daily summary for ${city}:`, error);
     throw error;
@@ -260,5 +223,4 @@ module.exports = {
   fetchWeatherData,
   calculateDailySummary,
   checkThresholds,
-  apiLimiter,
 };
