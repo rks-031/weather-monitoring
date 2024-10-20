@@ -2,8 +2,18 @@ const axios = require("axios");
 const nodemailer = require("nodemailer");
 const Threshold = require("../models/Threshold");
 const WeatherData = require("../models/WeatherData");
+const Redis = require("ioredis");
+const rateLimit = require("express-rate-limit");
 
-// Initialize email transporter
+const redis = new Redis(process.env.REDIS_URL);
+const CACHE_DURATION = 300; // 5 minutes
+
+// Rate limiting for API calls
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+});
+
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -12,12 +22,23 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Track consecutive threshold breaches
 const thresholdBreaches = {};
+
+async function getCachedData(key) {
+  const cached = await redis.get(key);
+  return cached ? JSON.parse(cached) : null;
+}
+
+async function setCachedData(key, data) {
+  await redis.setex(key, CACHE_DURATION, JSON.stringify(data));
+}
 
 async function fetchWeatherData(city) {
   try {
-    // Get coordinates first for UV data
+    const cacheKey = `weather:${city}`;
+    const cachedData = await getCachedData(cacheKey);
+    if (cachedData) return cachedData;
+
     const geoData = await axios.get(
       `http://api.openweathermap.org/geo/1.0/direct?q=${city},IN&limit=1&appid=${process.env.OPENWEATHER_API_KEY}`
     );
@@ -36,35 +57,62 @@ async function fetchWeatherData(city) {
       ),
     ]);
 
-    const forecastData = forecast.data.list.map((item) => ({
-      date: new Date(item.dt * 1000),
-      temp: item.main.temp - 273.15,
-      main: item.weather[0].main,
-      humidity: item.main.humidity,
-      wind_speed: item.wind.speed,
-      pressure: item.main.pressure,
-    }));
-
-    return {
+    const forecastData = processForecastData(forecast.data.list);
+    const weatherData = processCurrentWeather(
+      current.data,
+      uv.data.value,
       city,
-      main: current.data.weather[0].main,
-      temp: current.data.main.temp - 273.15,
-      feels_like: current.data.main.feels_like - 273.15,
-      humidity: current.data.main.humidity,
-      wind_speed: current.data.wind.speed,
-      pressure: current.data.main.pressure,
-      uv_index: uv.data.value,
-      timestamp: new Date(),
-      forecast: forecastData,
-    };
+      forecastData
+    );
+
+    await setCachedData(cacheKey, weatherData);
+    return weatherData;
   } catch (error) {
+    if (error.response?.status === 429) {
+      const cachedData = await getCachedData(`weather:${city}`);
+      if (cachedData) return cachedData;
+    }
     console.error(`Error fetching weather data for ${city}:`, error);
     throw error;
   }
 }
 
+function processForecastData(list) {
+  return list.map((item) => ({
+    date: new Date(item.dt * 1000),
+    temp: kelvinToCelsius(item.main.temp),
+    main: item.weather[0].main,
+    humidity: item.main.humidity,
+    wind_speed: item.wind.speed,
+    pressure: item.main.pressure,
+  }));
+}
+
+function processCurrentWeather(current, uvIndex, city, forecast) {
+  return {
+    city,
+    main: current.weather[0].main,
+    temp: kelvinToCelsius(current.main.temp),
+    feels_like: kelvinToCelsius(current.main.feels_like),
+    humidity: current.main.humidity,
+    wind_speed: current.wind.speed,
+    pressure: current.main.pressure,
+    uv_index: uvIndex,
+    timestamp: new Date(),
+    forecast,
+  };
+}
+
+function kelvinToCelsius(kelvin) {
+  return kelvin - 273.15;
+}
+
 async function calculateDailySummary(city, date) {
   try {
+    const cacheKey = `summary:${city}:${date.toISOString().split("T")[0]}`;
+    const cachedSummary = await getCachedData(cacheKey);
+    if (cachedSummary) return cachedSummary;
+
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(date);
@@ -75,102 +123,106 @@ async function calculateDailySummary(city, date) {
       timestamp: { $gte: startOfDay, $lte: endOfDay },
     });
 
-    if (weatherData.length === 0) {
-      return null;
-    }
+    if (weatherData.length === 0) return null;
 
-    // Calculate weather condition counts
-    const weatherCounts = {};
-    let totalTemp = 0;
-    let totalHumidity = 0;
-    let totalWindSpeed = 0;
-    let totalPressure = 0;
-    let temps = [];
-
-    weatherData.forEach((data) => {
-      weatherCounts[data.main] = (weatherCounts[data.main] || 0) + 1;
-      totalTemp += data.temp;
-      totalHumidity += data.humidity;
-      totalWindSpeed += data.wind_speed;
-      totalPressure += data.pressure;
-      temps.push(data.temp);
-    });
-
-    const count = weatherData.length;
-
-    // Find dominant weather condition
-    const dominantWeather = Object.entries(weatherCounts).sort(
-      (a, b) => b[1] - a[1]
-    )[0][0];
-
-    return {
-      city,
-      date: startOfDay,
-      avgTemp: totalTemp / count,
-      maxTemp: Math.max(...temps),
-      minTemp: Math.min(...temps),
-      avgHumidity: totalHumidity / count,
-      avgWindSpeed: totalWindSpeed / count,
-      avgPressure: totalPressure / count,
-      dominantWeather,
-      weatherDistribution: weatherCounts,
-    };
+    const summary = calculateSummaryStats(weatherData);
+    await setCachedData(cacheKey, summary);
+    return summary;
   } catch (error) {
     console.error(`Error calculating daily summary for ${city}:`, error);
     throw error;
   }
 }
 
+function calculateSummaryStats(weatherData) {
+  const weatherCounts = {};
+  const stats = weatherData.reduce(
+    (acc, data) => {
+      weatherCounts[data.main] = (weatherCounts[data.main] || 0) + 1;
+      acc.totalTemp += data.temp;
+      acc.totalHumidity += data.humidity;
+      acc.totalWindSpeed += data.wind_speed;
+      acc.totalPressure += data.pressure;
+      acc.temps.push(data.temp);
+      return acc;
+    },
+    {
+      totalTemp: 0,
+      totalHumidity: 0,
+      totalWindSpeed: 0,
+      totalPressure: 0,
+      temps: [],
+    }
+  );
+
+  const count = weatherData.length;
+  const dominantWeather = Object.entries(weatherCounts).sort(
+    (a, b) => b[1] - a[1]
+  )[0][0];
+
+  return {
+    city: weatherData[0].city,
+    date: weatherData[0].timestamp,
+    avgTemp: stats.totalTemp / count,
+    maxTemp: Math.max(...stats.temps),
+    minTemp: Math.min(...stats.temps),
+    avgHumidity: stats.totalHumidity / count,
+    avgWindSpeed: stats.totalWindSpeed / count,
+    avgPressure: stats.totalPressure / count,
+    dominantWeather,
+    weatherDistribution: weatherCounts,
+  };
+}
+
 async function checkThresholds(weatherData) {
   try {
     const thresholds = await Threshold.find({ city: weatherData.city });
-
-    for (const threshold of thresholds) {
-      const highKey = `${weatherData.city}_high_${threshold._id}`;
-      const lowKey = `${weatherData.city}_low_${threshold._id}`;
-
-      // Check high temperature breach
-      if (weatherData.temp > threshold.maxTemp) {
-        await processThresholdBreach(highKey, weatherData, threshold, "high");
-      } else {
-        thresholdBreaches[highKey] = null;
-      }
-
-      // Check low temperature breach
-      if (weatherData.temp < threshold.minTemp) {
-        await processThresholdBreach(lowKey, weatherData, threshold, "low");
-      } else {
-        thresholdBreaches[lowKey] = null;
-      }
-    }
+    await Promise.all(
+      thresholds.map((threshold) => processThresholds(weatherData, threshold))
+    );
   } catch (error) {
     console.error("Error checking thresholds:", error);
     throw error;
   }
 }
 
-async function processThresholdBreach(key, weatherData, threshold, type) {
-  if (!thresholdBreaches[key]) {
-    thresholdBreaches[key] = {
-      count: 1,
-      lastUpdate: new Date(),
-    };
+async function processThresholds(weatherData, threshold) {
+  const highKey = `${weatherData.city}_high_${threshold._id}`;
+  const lowKey = `${weatherData.city}_low_${threshold._id}`;
+
+  if (weatherData.temp > threshold.maxTemp) {
+    await processThresholdBreach(highKey, weatherData, threshold, "high");
   } else {
-    const timeDiff = new Date() - new Date(thresholdBreaches[key].lastUpdate);
-    if (timeDiff <= 300000) {
-      // Within 5 minutes
-      thresholdBreaches[key].count++;
-      if (thresholdBreaches[key].count >= 2) {
-        await sendAlert(threshold.email, weatherData, type);
-        thresholdBreaches[key] = null;
-      }
-    } else {
-      thresholdBreaches[key] = {
-        count: 1,
-        lastUpdate: new Date(),
-      };
-    }
+    thresholdBreaches[highKey] = null;
   }
+
+  if (weatherData.temp < threshold.minTemp) {
+    await processThresholdBreach(lowKey, weatherData, threshold, "low");
+  } else {
+    thresholdBreaches[lowKey] = null;
+  }
+}
+
+async function processThresholdBreach(key, weatherData, threshold, type) {
+  const currentState = thresholdBreaches[key] || {
+    count: 0,
+    lastUpdate: new Date(),
+  };
+  const timeDiff = new Date() - new Date(currentState.lastUpdate);
+
+  if (timeDiff <= 300000) {
+    currentState.count++;
+    if (currentState.count >= 2) {
+      await sendAlert(threshold.email, weatherData, type);
+      thresholdBreaches[key] = null;
+      return;
+    }
+  } else {
+    currentState.count = 1;
+  }
+
+  currentState.lastUpdate = new Date();
+  thresholdBreaches[key] = currentState;
 }
 
 async function sendAlert(email, weatherData, type) {
@@ -178,17 +230,7 @@ async function sendAlert(email, weatherData, type) {
     from: process.env.EMAIL_USER,
     to: email,
     subject: `Weather Alert for ${weatherData.city}`,
-    html: `
-      <h2>Temperature Alert</h2>
-      <p>Consecutive ${type} temperature detected in ${weatherData.city}</p>
-      <p>Current temperature: ${weatherData.temp.toFixed(1)}°C</p>
-      <p>Humidity: ${weatherData.humidity}%</p>
-      <p>Wind Speed: ${weatherData.wind_speed} m/s</p>
-      <p>Pressure: ${weatherData.pressure} hPa</p>
-      <p>UV Index: ${weatherData.uv_index}</p>
-      <p>Weather Condition: ${weatherData.main}</p>
-      <p>Time: ${new Date(weatherData.timestamp).toLocaleString()}</p>
-    `,
+    html: generateAlertEmail(weatherData, type),
   };
 
   try {
@@ -200,8 +242,23 @@ async function sendAlert(email, weatherData, type) {
   }
 }
 
+function generateAlertEmail(weatherData, type) {
+  return `
+    <h2>Temperature Alert</h2>
+    <p>Consecutive ${type} temperature detected in ${weatherData.city}</p>
+    <p>Current temperature: ${weatherData.temp.toFixed(1)}°C</p>
+    <p>Humidity: ${weatherData.humidity}%</p>
+    <p>Wind Speed: ${weatherData.wind_speed} m/s</p>
+    <p>Pressure: ${weatherData.pressure} hPa</p>
+    <p>UV Index: ${weatherData.uv_index}</p>
+    <p>Weather Condition: ${weatherData.main}</p>
+    <p>Time: ${new Date(weatherData.timestamp).toLocaleString()}</p>
+  `;
+}
+
 module.exports = {
   fetchWeatherData,
   calculateDailySummary,
   checkThresholds,
+  apiLimiter,
 };
