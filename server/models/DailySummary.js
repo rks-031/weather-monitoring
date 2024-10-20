@@ -6,7 +6,10 @@ const dailySummarySchema = new mongoose.Schema({
   avgTemp: Number,
   maxTemp: Number,
   minTemp: Number,
+  avgHumidity: Number,
+  avgWindSpeed: Number,
   dominantWeather: String,
+  weatherDistribution: Map,
 });
 
 module.exports = mongoose.model("DailySummary", dailySummarySchema);

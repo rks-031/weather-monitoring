@@ -1,25 +1,36 @@
+// utils/weatherUtils.js
 const axios = require("axios");
 const nodemailer = require("nodemailer");
 const Threshold = require("../models/Threshold");
 const WeatherData = require("../models/WeatherData");
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
-
 async function fetchWeatherData(city) {
-  const url = `https://api.openweathermap.org/data/2.5/weather?q=${city},IN&appid=${process.env.OPENWEATHER_API_KEY}`;
-  const response = await axios.get(url);
+  const [current, forecast] = await Promise.all([
+    axios.get(
+      `https://api.openweathermap.org/data/2.5/weather?q=${city},IN&appid=${process.env.OPENWEATHER_API_KEY}`
+    ),
+    axios.get(
+      `https://api.openweathermap.org/data/2.5/forecast?q=${city},IN&appid=${process.env.OPENWEATHER_API_KEY}`
+    ),
+  ]);
+
+  const forecastData = forecast.data.list.map((item) => ({
+    date: new Date(item.dt * 1000),
+    temp: item.main.temp - 273.15,
+    main: item.weather[0].main,
+    humidity: item.main.humidity,
+    wind_speed: item.wind.speed,
+  }));
+
   return {
     city,
-    main: response.data.weather[0].main,
-    temp: response.data.main.temp - 273.15,
-    feels_like: response.data.main.feels_like - 273.15,
+    main: current.data.weather[0].main,
+    temp: current.data.main.temp - 273.15,
+    feels_like: current.data.main.feels_like - 273.15,
+    humidity: current.data.main.humidity,
+    wind_speed: current.data.wind.speed,
     timestamp: new Date(),
+    forecast: forecastData,
   };
 }
 
@@ -34,44 +45,86 @@ async function calculateDailySummary(city, date) {
     timestamp: { $gte: startOfDay, $lte: endOfDay },
   });
 
-  const temps = weatherData.map((data) => data.temp);
-  const weatherConditions = weatherData.map((data) => data.main);
+  const weatherCounts = {};
+  let totalTemp = 0,
+    totalHumidity = 0,
+    totalWindSpeed = 0;
+  const temps = [];
 
-  const dominantWeather = weatherConditions.reduce((acc, curr) => {
-    acc[curr] = (acc[curr] || 0) + 1;
-    return acc;
-  }, {});
+  weatherData.forEach((data) => {
+    weatherCounts[data.main] = (weatherCounts[data.main] || 0) + 1;
+    totalTemp += data.temp;
+    totalHumidity += data.humidity;
+    totalWindSpeed += data.wind_speed;
+    temps.push(data.temp);
+  });
 
+  const count = weatherData.length;
   return {
     city,
     date: startOfDay,
-    avgTemp: temps.reduce((a, b) => a + b, 0) / temps.length,
+    avgTemp: totalTemp / count,
     maxTemp: Math.max(...temps),
     minTemp: Math.min(...temps),
-    dominantWeather: Object.entries(dominantWeather).sort(
+    avgHumidity: totalHumidity / count,
+    avgWindSpeed: totalWindSpeed / count,
+    dominantWeather: Object.entries(weatherCounts).sort(
       (a, b) => b[1] - a[1]
     )[0][0],
+    weatherDistribution: weatherCounts,
   };
 }
+
+let previousTemps = {};
 
 async function checkThresholds(weatherData) {
   const thresholds = await Threshold.find({ city: weatherData.city });
 
   for (const threshold of thresholds) {
-    if (
-      weatherData.temp > threshold.maxTemp ||
-      weatherData.temp < threshold.minTemp
-    ) {
-      const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: threshold.email,
-        subject: `Weather Alert for ${weatherData.city}`,
-        text: `Temperature threshold breached! Current temperature: ${weatherData.temp}°C`,
-      };
+    const prevTemp = previousTemps[weatherData.city];
+    const currentTemp = weatherData.temp;
 
-      await transporter.sendMail(mailOptions);
+    const isConsecutiveHigh =
+      currentTemp > threshold.maxTemp && prevTemp > threshold.maxTemp;
+    const isConsecutiveLow =
+      currentTemp < threshold.minTemp && prevTemp < threshold.minTemp;
+
+    if (isConsecutiveHigh || isConsecutiveLow) {
+      await sendAlert(
+        threshold.email,
+        weatherData,
+        isConsecutiveHigh ? "high" : "low"
+      );
     }
+
+    previousTemps[weatherData.city] = currentTemp;
   }
+}
+
+async function sendAlert(email, weatherData, type) {
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+  });
+
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: `Weather Alert for ${weatherData.city}`,
+    html: `
+      <h2>Temperature Alert</h2>
+      <p>Consecutive ${type} temperature detected in ${weatherData.city}</p>
+      <p>Current temperature: ${weatherData.temp.toFixed(1)}°C</p>
+      <p>Current humidity: ${weatherData.humidity}%</p>
+      <p>Wind speed: ${weatherData.wind_speed} m/s</p>
+      <p>Weather condition: ${weatherData.main}</p>
+    `,
+  };
+
+  await transporter.sendMail(mailOptions);
 }
 
 module.exports = {

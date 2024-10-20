@@ -1,3 +1,6 @@
+const WeatherData = require("./models/WeatherData");
+const DailySummary = require("./models/DailySummary");
+
 require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
