@@ -166,3 +166,17 @@ Access historical data exports at:
 
 - `/api/export/csv` - CSV format
 - `/api/export/json` - JSON format
+
+### List of Dependencies
+
+1. `Backend`:
+
+```shell
+autocannon, axios, cors, dotenv, express, json2csv, mongoose, node-cron, nodemailer, chai, chai-http, jest, mocha, nodemon, supertest
+```
+
+2. `Frontend`:
+
+```shell
+@popperjs/core, axios, bootstrap, react, react-bootstrap, react-dom, react-router-dom, recharts, @eslint/js, @types/react, @types/react-dom, @vitejs/plugin-react, eslint, eslint-plugin-react, eslint-plugin-react-hooks, eslint-plugin-react-refresh, globals, vite
+```
