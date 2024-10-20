@@ -14,7 +14,7 @@ export default function ThresholdSettings() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     try {
-      await axios.post('/api/thresholds', formData)
+      await axios.post('/thresholds', formData)
       alert('Threshold settings saved successfully!')
     } catch (error) {
       alert('Error saving threshold settings')
