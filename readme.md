@@ -167,7 +167,7 @@ Access historical data exports at:
 - `/api/export/csv` - CSV format
 - `/api/export/json` - JSON format
 
-### List of Dependencies
+## List of Dependencies
 
 1. `Backend`:
 
