@@ -180,3 +180,7 @@ autocannon, axios, cors, dotenv, express, json2csv, mongoose, node-cron, nodemai
 ```shell
 @popperjs/core, axios, bootstrap, react, react-bootstrap, react-dom, react-router-dom, recharts, @eslint/js, @types/react, @types/react-dom, @vitejs/plugin-react, eslint, eslint-plugin-react, eslint-plugin-react-hooks, eslint-plugin-react-refresh, globals, vite
 ```
+
+## Project Maintainer:
+
+`Rajnish Kumar Singh`
