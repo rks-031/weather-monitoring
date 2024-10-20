@@ -4,7 +4,7 @@ export default function Navigation() {
   return (
     <nav className="navbar navbar-expand-lg navbar-light bg-light shadow">
       <div className="container">
-        <Link to="/" className="navbar-brand">Weather Monitor</Link>
+        <Link to="/" className="navbar-brand"><strong>WeatherMonitor</strong></Link>
         <div className="navbar-nav ms-auto">
           <Link to="/" className="nav-link">Dashboard</Link>
           <Link to="/analysis" className="nav-link">Analysis & Export</Link>
