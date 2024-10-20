@@ -7,6 +7,8 @@ const weatherSchema = new mongoose.Schema({
   feels_like: Number,
   humidity: Number,
   wind_speed: Number,
+  pressure: Number,
+  uv_index: Number,
   timestamp: Date,
   forecast: [
     {
@@ -15,6 +17,8 @@ const weatherSchema = new mongoose.Schema({
       main: String,
       humidity: Number,
       wind_speed: Number,
+      pressure: Number,
+      uv_index: Number,
     },
   ],
 });
